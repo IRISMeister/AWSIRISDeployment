@@ -8,11 +8,9 @@ Metadata:
 Parameters:
   VpcIdParameter:
     Description: Launch EC2 instances in this VPC
-    Default: vpc-029aba04d6dbcfae4
     Type: AWS::EC2::VPC::Id
   InstanceSubnetIdParameter:
     Description: Launch EC2 instances in this subnet
-    Default: subnet-024ee9bc8ba573050
     Type: AWS::EC2::Subnet::Id
   #InstanceSecurityGroupParameter:
   #  Description:  Security group for the instance

@@ -6,17 +6,18 @@ Metadata:
     Description: IRIS Arbiter Node
 
 Parameters:
-  #VpcIdParameter:
-  #  Description: Launch EC2 instances in this VPC
-  #  Default: vpc-029aba04d6dbcfae4
-  #  Type: AWS::EC2::VPC::Id
+  VpcIdParameter:
+    Description: Launch EC2 instances in this VPC
+    Type: AWS::EC2::VPC::Id
   InstanceSubnetIdParameter:
     Description: Launch EC2 instances in this subnet
-    Default: subnet-024ee9bc8ba573050
     Type: AWS::EC2::Subnet::Id
-  InstanceSecurityGroupParameter:
-    Description:  Security group for the instance
-    Type: AWS::EC2::SecurityGroup::Id
+  RemoteAccessCIDRParameter:
+    AllowedPattern: ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/([0-9]|[1-2][0-9]|3[0-2]))$
+    ConstraintDescription: CIDR block parameter must be in the form x.x.x.x/x
+    Description: Restrict to <your-own-ip>/32 for better security
+    Default: 0.0.0.0/0
+    Type: String
   SshKeyParameter:
     Description: SSH Keypair to login to the instance
     Default: anton-isc
@@ -51,6 +52,28 @@ Parameters:
       - ARBITER      
 
 Resources:
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow selected CIDR block to access port 22
+      GroupName: !Sub "${AWS::StackName}-Arbiter-SG"
+      VpcId: !Ref VpcIdParameter
+  SecurityGroupIngressSSH:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref InstanceSecurityGroup
+      IpProtocol: TCP
+      FromPort: 22
+      ToPort: 22
+      CidrIp: !Ref RemoteAccessCIDRParameter
+  SecurityGroupIngressIRISAgent:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref InstanceSecurityGroup
+      IpProtocol: TCP
+      FromPort: 2188
+      ToPort: 2188
+      CidrIp: !Ref RemoteAccessCIDRParameter
   ##Node Start##         
   NodeInstance:
     Type: AWS::EC2::Instance
@@ -68,7 +91,7 @@ Resources:
       KeyName: !Ref SshKeyParameter
       IamInstanceProfile: !Ref IamInstanceProfileParameter
       SecurityGroupIds:
-        - !Ref InstanceSecurityGroupParameter
+        - !Ref InstanceSecurityGroup
       SubnetId: !Ref InstanceSubnetIdParameter
       UserData:
         Fn::Base64:
@@ -76,7 +99,6 @@ Resources:
          - |
            #!/usr/bin/env bash
            DISTR=ISCAgent-2020.1.0.215.0-lnxrhx64
-           #DISTR=ISCAgent-2020.1.0.197.0-lnxrhx64
            BUCKET=${ConfigS3BucketName}
            INSTANCEROLE=${MirrorInstanceRole}
            set -o errexit

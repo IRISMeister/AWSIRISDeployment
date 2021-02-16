@@ -2,9 +2,8 @@
 AWSTemplateFormatVersion: 2010-09-09
 Metadata:
     Author: Anton Umnikov
-    Last Updated: September 23, 2020
+    Last Updated: August 12, 2020
     Description: IRIS Mirror Node
-    #aws s3 cp MirrorNode.yaml s3://isc-tech-validation --acl public-read
 
 Mappings:
 
@@ -144,8 +143,7 @@ Resources:
          Fn::Sub:
          - |
            #!/usr/bin/env bash
-           DISTR=IRISHealth-2020.1.0.217.1-lnxrhx64
-           #DISTR=IRIS-2020.1.0.197.0-lnxrhx64
+           DISTR=IRIS-2020.1.0.215.0-lnxrhx64
            BUCKET=${ConfigS3BucketName}
            INSTANCEROLE=${MirrorInstanceRole}
            if [ "$INSTANCEROLE" == "PRIMARY" ]
@@ -196,10 +194,10 @@ Resources:
            cd /tmp/irisdistr
            aws s3 cp s3://$BUCKET/iris.key .
            aws s3 cp s3://$BUCKET/$DISTR.tar.gz .
-           #aws s3 cp s3://$BUCKET/MirrorInstaller.xml .
-           #aws s3 cp s3://$BUCKET/iris.service .
-           wget https://isc-tech-validation.s3.amazonaws.com/MirrorInstaller.xml
-           wget https://isc-tech-validation.s3.amazonaws.com/iris.service
+           aws s3 cp s3://$BUCKET/MirrorInstaller.xml .
+           aws s3 cp s3://$BUCKET/iris.service .
+           #wget https://isc-tech-validation.s3.amazonaws.com/MirrorInstaller.xml
+           #wget https://isc-tech-validation.s3.amazonaws.com/iris.service
            cp iris.service /etc/systemd/system/iris.service
            chmod 644 /etc/systemd/system/iris.service
            tar -xvf $DISTR.tar.gz
@@ -211,9 +209,7 @@ Resources:
            ISC_INSTALLER_MANIFEST="/tmp/irisdistr/MirrorInstaller.xml" \
            ISC_PACKAGE_INITIAL_SECURITY="Normal" \
            ISC_PACKAGE_USER_PASSWORD="${ConfigIRISPassword}" \
-           ISC_INSTALLER_PARAMETERS="ConfigGlobalBuffers=${ConfigGlobalBuffers}\
-           ,ConfigGMHeap=${ConfigGMHeap}\
-           ,ConfigLockTable=${ConfigLockTable}" \
+           ISC_INSTALLER_PARAMETERS="ConfigGlobalBuffers=${ConfigGlobalBuffers}" \
            ./irisinstall_silent &&
            cd .. &&
            sudo cp iris.key /iris/sys/mgr &&
@@ -227,13 +223,16 @@ Resources:
            sleep 2 &&
            echo "\nexecuting $IRIS_COMMAND_INIT_MIRROR" && 
            iris session iris -U\%SYS "$IRIS_COMMAND_INIT_MIRROR" &&
+           # Without restart, FAILOVER member fails to retrieve (mirror) journal file...and retries forever...
+           if [ "$INSTANCEROLE" == "FAILOVER" ]
+           then
+              sudo iris restart iris quietly
+           fi
            sleep 2 &&
            echo "\nexecuting $IRIS_COMMAND_CREATE_DB" && 
            iris session iris -U\%SYS "$IRIS_COMMAND_CREATE_DB"
          - {
            ConfigGlobalBuffers: !FindInMap [IRISParametersMap, !Ref InstanceTypeParameter, GlobalBuffers],
-           ConfigGMHeap: !FindInMap [IRISParametersMap, !Ref InstanceTypeParameter, gmheap],
-           ConfigLockTable: !FindInMap [IRISParametersMap, !Ref InstanceTypeParameter, LockTable],
            ConfigIRISPassword: !Ref IRISPasswordParameter,
            ConfigS3BucketName: !Ref S3BucketNameParameter,
            MirrorInstanceRole: !Ref MirrorInstanceRole,

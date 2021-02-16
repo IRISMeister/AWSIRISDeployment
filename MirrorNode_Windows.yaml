@@ -1,0 +1,380 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Metadata:
+    Author: Tomohiro Iwamoto
+    Last Updated: Feb 12, 2021
+    Description: IRIS Mirror Node for Windows. Based on Anton's work for Linux.
+
+Mappings:
+
+  IRISParametersMap:
+    m5.large: 
+      GlobalBuffers: 4000
+      gmheap: 256000
+      LockTable: 64000
+    r5.xlarge:
+      GlobalBuffers: 24000
+      gmheap: 512000
+      LockTable: 96000
+    r5.2xlarge:
+      GlobalBuffers: 48000
+      gmheap: 512000
+      LockTable: 96000
+    r5.4xlarge:
+      GlobalBuffers: 100000
+      gmheap: 768000
+      LockTable: 96000
+    r5.8xlarge:
+      GlobalBuffers: 200000
+      gmheap: 1024000
+      LockTable: 128000
+    r5.16xlarge:
+      GlobalBuffers: 200000
+      gmheap: 1024000
+      LockTable: 128000
+
+
+Parameters:
+  #VpcIdParameter:
+  #  Description: Launch EC2 instances in this VPC
+  #  Type: AWS::EC2::VPC::Id
+  InstanceSubnetIdParameter:
+    Description: Launch EC2 instances in this subnet
+    Type: AWS::EC2::Subnet::Id
+  InstanceSecurityGroupParameter:
+    Description:  Security group for the instance
+    Type: AWS::EC2::SecurityGroup::Id
+  SshKeyParameter:
+    Description: SSH Keypair to login to the instance
+    Type: AWS::EC2::KeyPair::KeyName
+  IamInstanceProfileParameter:
+    Description: IAM instance role for EC2 instances
+    Type: String
+  IRISPasswordParameter:
+    Description: Admin Password for IRIS
+    Type: String
+    NoEcho: true
+  S3BucketNameParameter:
+    Description: S3 Bucket with IRIS binaries
+    Type: String
+    Default: my-cf-templates
+  InstanceTypeParameter:
+    Description: Cluster node instance type
+    Type: String
+    Default: m5.large
+    AllowedValues: 
+      - m5.large
+      - r5.xlarge
+      - r5.2xlarge
+      - r5.4xlarge
+      - r5.8xlarge
+      - r5.16xlarge
+  LatestAmiIdParameter:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: /aws/service/ami-windows-latest/Windows_Server-2019-Japanese-Full-Base
+  MirrorInstanceRole:
+    Description: Cluster node instance role
+    Type: String
+    Default: NONE
+    AllowedValues: 
+      - NONE
+      - PRIMARY
+      - FAILOVER
+      - ASYNC
+      - ARBITER      
+  MirrorPrimaryIP:
+    Type: String
+    Default: none
+  MirrorArbiterIP:
+    Type: String
+    Default: none
+  MirrorDBName:
+    Type: String
+    Default: DATA
+
+Resources:
+  ##Node Start##         
+  NodeInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      Tags: 
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-IRIS"
+      BlockDeviceMappings:
+        # /iris/sys -> H: drive
+        - DeviceName: /dev/sdb
+          Ebs:
+            DeleteOnTermination: true
+            VolumeSize: 256
+            VolumeType: io1
+            Iops: 1000
+            Encrypted : true
+        # /iris/db -> I:
+        - DeviceName: /dev/sdc
+          Ebs:
+            DeleteOnTermination: true
+            VolumeSize: 512
+            VolumeType: io1
+            Iops: 10000
+            Encrypted : true
+        # /iris/jrnl -> J:
+        - DeviceName: /dev/sdd
+          Ebs:
+            DeleteOnTermination: true
+            VolumeSize: 512
+            VolumeType: io1
+            Iops: 1000
+            Encrypted : true
+        # /iris/jrnl/alt -> K:
+        - DeviceName: /dev/sde
+          Ebs:
+            DeleteOnTermination: true
+            VolumeSize: 32
+            VolumeType: io1
+            Iops: 1000
+            Encrypted : true
+      ImageId: !Ref LatestAmiIdParameter 
+        #Fn::FindInMap:
+        #- RegionMap
+        #- Ref: AWS::Region
+        #- AMIx64
+      InstanceType: !Ref InstanceTypeParameter
+      KeyName: !Ref SshKeyParameter
+      IamInstanceProfile: !Ref IamInstanceProfileParameter
+      SecurityGroupIds:
+        - !Ref InstanceSecurityGroupParameter
+      SubnetId: !Ref InstanceSubnetIdParameter
+      UserData:
+        Fn::Base64:
+         Fn::Sub:
+         - |
+          <powershell>
+          mkdir /temp
+          echo `$ConfigGlobalBuffers='"${ConfigGlobalBuffers}"' > /temp/envs.ps1
+          echo `$ConfigIRISPassword='"${ConfigIRISPassword}"' >> /temp/envs.ps1
+          echo `$ConfigS3BucketName='"${ConfigS3BucketName}"' >> /temp/envs.ps1
+          echo `$MirrorInstanceRole='"${MirrorInstanceRole}"' >> /temp/envs.ps1
+          echo `$MirrorPrimaryIP='"${MirrorPrimaryIP}"' >> /temp/envs.ps1
+          echo `$MirrorArbiterIP='"${MirrorArbiterIP}"' >> /temp/envs.ps1
+          echo `$MirrorDBName='"${MirrorDBName}"' >> /temp/envs.ps1
+          cfn-init.exe -v --stack ${AWS::StackName} --resource NodeInstance --configsets ascending --region ${AWS::Region}
+          cfn-signal.exe --stack ${AWS::StackName} --resource NodeInstance --region ${AWS::Region}
+          </powershell>
+         - {
+           ConfigGlobalBuffers: !FindInMap [IRISParametersMap, !Ref InstanceTypeParameter, GlobalBuffers],
+           ConfigIRISPassword: !Ref IRISPasswordParameter,
+           ConfigS3BucketName: !Ref S3BucketNameParameter,
+           MirrorInstanceRole: !Ref MirrorInstanceRole,
+           MirrorPrimaryIP: !Ref MirrorPrimaryIP,
+           MirrorArbiterIP: !Ref MirrorArbiterIP,
+           MirrorDBName: !Ref MirrorDBName
+           }
+
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          ascending:
+            - config1
+            - config2
+            - config3
+        config1:
+          files:
+            c:\cfn\cfn-hup.conf:
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+            c:\cfn\hooks.d\cfn-auto-reloader.conf:
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.NodeInstance.Metadata.AWS::CloudFormation::Init
+                action=cfn-init.exe -v --stack ${AWS::StackName} --resource NodeInstance --region ${AWS::Region}
+            c:\cfn\scripts\Setup-config.ps1:
+              content: |
+                # set JST TimeZone
+                tzutil /s "Tokyo Standard Time"
+                Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\TimeZoneInformation" -Name "RealTimeIsUniversal" -Value 1
+                # disabled firewall
+                Get-NetFirewallProfile | Set-NetFirewallProfile -Enabled false
+                # show fileext and hidden file
+                Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "HideFileExt" -Value 0
+                Set-ItemProperty -Path "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Hidden" -Value 1
+            c:\cfn\scripts\Install-choco-packages.ps1:
+              content: |
+                # install package manager and packages
+                # suppressed warning. UnicodeEncodeError fails because the output contains Japanese.
+                $WarningPreference = "SilentlyContinue"
+                iwr https://chocolatey.org/install.ps1 -UseBasicParsing | iex
+                $WarningPreference = "Continue"
+                choco install -y notepadplusplus.install awscli googlechrome | Out-Null
+            c:\cfn\scripts\Install-IRIS.ps1:
+              content: |
+                $WarningPreference = "SilentlyContinue"
+                # To prevent "[ERROR] Unhandled exception during build: 'utf8' codec can't decode byte 0xNN
+                [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+                cd /temp
+                . ./envs.ps1
+
+                # ++ Parameters ++
+                $DISTR="IRIS-2020.1.0.215.0-win_x64"
+                $irisdir="h:\InterSystems\IRIS"
+                $irissvcname="IRIS_h-_intersystems_iris"
+                $irisdbdir="i:\iris\db\"
+                $irisjrndir="j:\iris\jrnl\pri"
+                $irisjrnaltdir="k:\iris\jrnl\alt"
+                # -- Parameters --
+
+                $BUCKET=$ConfigS3BucketName
+                $INSTANCEROLE=$MirrorInstanceRole
+                if ( $INSTANCEROLE -eq "PRIMARY" )
+                {
+                  echo "Initializing as PRIMARY mirror member"
+                  $IRIS_COMMAND_INIT_MIRROR="##class(SE.ShardInstaller).CreateMirrorSet(`"$MirrorArbiterIP`")"
+                  $IRIS_COMMAND_CREATE_DB="##class(SE.ShardInstaller).CreateMirroredDB(`"$MirrorDBName`",`"$irisdbdir`")"
+                }
+                if ( $INSTANCEROLE -eq "FAILOVER" )
+                {
+                  echo "Initializing as FAILOVER mirror member"
+                  $IRIS_COMMAND_INIT_MIRROR="##class(SE.ShardInstaller).JoinAsFailover(`"$MirrorPrimaryIP`")"
+                  $IRIS_COMMAND_CREATE_DB="##class(SE.ShardInstaller).CreateMirroredDB(`"$MirrorDBName`",`"$irisdbdir`")"
+                }
+
+                mkdir /temp/irisdistr
+                cd /temp/irisdistr
+                
+                $iris=$irisdir+"\bin\iris.exe"
+                $irisdb=$irisdir+"\bin\irisdb.exe"
+                $irismgr=$irisdir+"\mgr"
+
+                & 'C:\Program Files\Amazon\AWSCLIV2\aws.exe' s3 cp s3://$BUCKET/iris.key .
+                & 'C:\Program Files\Amazon\AWSCLIV2\aws.exe' s3 cp s3://$BUCKET/$DISTR.exe .
+                & 'C:\Program Files\Amazon\AWSCLIV2\aws.exe' s3 cp s3://$BUCKET/MirrorInstaller.xml .
+                & .\$DISTR /instance IRIS /qn INSTALLERMANIFESTLOGFILE=C:\temp\silentinstall.log INSTALLDIR=$irisdir INITIALSECURITY=Normal ISCSTARTLAUNCHER=0 IRISUSERPASSWORD=$ConfigIRISPassword SUPERSERVERPORT=51773 WEBSERVERPORT=52773 INSTALLERMANIFEST=c:\temp\irisdistr\MirrorInstaller.xml INSTALLERMANIFESTPARAMS=ConfigGlobalBuffers=$ConfigGlobalBuffers,DBDir=$irisdbdir,JrnDir=$irisjrndir,JrnAltDir=$irisjrnaltdir
+
+                # Windows installer runs in background. There is no clean way to know when it's done.
+                # Wait for a while until IRIS is installed
+                Start-Sleep -s 30
+
+                # Wait until IRIS is ready
+                # Caution! Service name must be adjusted to reflect actual installation path.
+                # You may see 'ObjectNotFound' errors repeatedly in cfn-init-cmd.log. It will succeed eventually.
+                $cnt=0
+                while(1) {
+                  #if ((& $iris qlist | Select-String running).Count -eq 1)
+                  if ((Get-Service $irissvcname).Status -eq "Running")
+                  {
+                    break
+                  }
+                  Start-Sleep -s 10
+                  $cnt=$cnt+1
+                  if ($cnt -eq 10 ) {
+                    echo "gave up"
+                    break
+                  }
+                }
+
+                cp iris.key $irismgr\iris.key
+                & $iris restart iris quietly
+                Set-Service -Name 'iscagent' -StartupType 'Automatic'
+                Start-Service 'iscagent'
+
+                # Nothing to do if non-mirror member
+                if ( $INSTANCEROLE -ne "NONE" )
+                {
+                  echo "`r`nexecuting ##class(SE.ShardInstaller).EnableMirroringService()" 
+                  echo "D ##class(SE.ShardInstaller).EnableMirroringService() h" | &$irisdb -s $irismgr -U %SYS
+
+                  Start-Sleep -s 2
+                  echo "`r`nexecuting $IRIS_COMMAND_INIT_MIRROR"
+                  # No "iris session" command on Windows....
+                  echo "D $IRIS_COMMAND_INIT_MIRROR h" | &$irisdb -s $irismgr -U %SYS
+                  # Without restart, FAILOVER member fails to retrieve (mirror) journal file...and retries forever...
+                  if ( $INSTANCEROLE -eq "FAILOVER" )
+                  {
+                    & $iris restart iris quietly
+                  }
+                  Start-Sleep -s 2
+                  echo "`r`nexecuting $IRIS_COMMAND_CREATE_DB" 
+                  echo "D $IRIS_COMMAND_CREATE_DB h" | &$irisdb -s $irismgr -U %SYS
+                }
+
+                # Cleanup
+                cd /temp
+                rmdir -Force -Recurse /temp/irisdistr
+            c:\cfn\scripts\drives.diskpart.txt:
+              content: |
+                select disk 1
+                attributes disk clear readonly
+                clean
+                convert gpt
+                create partition primary
+                format quick fs=ntfs label="IRIS"
+                assign letter=H
+                select disk 2
+                attributes disk clear readonly
+                clean
+                convert gpt
+                create partition primary
+                format quick fs=ntfs label="DATA"
+                assign letter=I
+                select disk 3
+                attributes disk clear readonly
+                clean
+                convert gpt
+                create partition primary
+                format quick fs=ntfs label="JOURNAL"
+                assign letter=J
+                select disk 4
+                attributes disk clear readonly
+                clean
+                convert gpt
+                create partition primary
+                format quick fs=ntfs label="JRNALT"
+                assign letter=K
+            c:\cfn\scripts\renamedrives.ps1:
+              content: |
+                # Redirect to a file to prevent "[ERROR] Unhandled exception during build: 'utf8' codec can't decode byte 0x83 in position 21: invalid start byte"
+                diskpart /s c:\cfn\scripts\drives.diskpart.txt > /temp/diskpart.log
+        config2:
+          commands:
+            1-setup-config:
+              command: 'powershell.exe -File c:\cfn\scripts\Setup-config.ps1'
+              waitAfterCompletion: '0'
+            2-install-choco-packages:
+              command: 'powershell.exe -File c:\cfn\scripts\Install-choco-packages.ps1 -ExecutionPolicy Bypass'
+              waitAfterCompletion: '0'
+          services:
+            windows:
+              cfn-hup:
+                enabled: 'true'
+                ensureRunning: 'true'
+                files:
+                  - c:\cfn\cfn-hup.conf
+                  - c:\cfn\hooks.d\cfn-auto-reloader.conf
+        config3:
+          commands:
+            1-setup-disk:
+              command: 'powershell.exe -File c:\cfn\scripts\renamedrives.ps1 -ExecutionPolicy Bypass'
+              waitAfterCompletion: '0'
+            2-install-iris:
+              command: 'powershell.exe -File c:\cfn\scripts\Install-IRIS.ps1 -ExecutionPolicy Bypass'
+              waitAfterCompletion: '0'
+
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+  ##Node End##          
+
+Outputs:
+  #NodePublicIP:
+    #Description: Node PublicIP
+    #Value: !Join
+    # - ''
+    # - ['', !GetAtt NodeInstance.PublicIp, '']
+  NodePrivateIP:
+    Description: Node PrivateIP
+    Value: !Join
+      - ''
+      - ['', !GetAtt NodeInstance.PrivateIp, '']

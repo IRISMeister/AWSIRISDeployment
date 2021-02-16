@@ -2,7 +2,7 @@
 AWSTemplateFormatVersion: 2010-09-09
 Metadata:
   Author: Anton Umnikov
-  Last Updated: September 23, 2020
+  Last Updated: August 12, 2020
   Description: IRIS Mirror Cluster
   AWS::CloudFormation::Interface: 
     ParameterGroups: 
@@ -27,6 +27,7 @@ Metadata:
           - InstanceTypeParameter
           - SshKeyParameter
           - IamInstanceProfileParameter
+          - LatestAmiIdForIRISParameter
 
     ParameterLabels: 
       VpcIdParameter: 
@@ -47,6 +48,9 @@ Metadata:
         default: "Password for SuperUser/_SYSTEM user"
       S3BucketNameParameter:
         default: "S3 bucket with IRIS binaries"
+      LatestAmiIdForIRISParameter:
+        default: "Which language version of Windows should be deployed to?"
+
 
 
 Parameters:
@@ -54,10 +58,10 @@ Parameters:
     Description: Launch EC2 instances in this VPC
     Type: AWS::EC2::VPC::Id
   BastionSubnetIdParameter:
-    Description: Public Subnets
+    Description: 2 subnets in two different Availability Zones. Public Subnets. 
     Type: 'List<AWS::EC2::Subnet::Id>'
   InstanceSubnetIdParameter:
-    Description: 3 Subnets in three different Availability Zones. Last subnet is for arbiter.
+    Description: 3 subnets in three different Availability Zones. Last subnet is for arbiter.
     Type: 'List<AWS::EC2::Subnet::Id>'
   SshKeyParameter:
     Description: SSH Keypair to login to the instance
@@ -70,7 +74,6 @@ Parameters:
     Type: String
   IamInstanceProfileParameter:
     Description: IAM instance role for EC2 instances 
-    Default: S3FullAccessForEC2
     Type: String
   IRISPasswordParameter:
     Description: Admin Password for IRIS (at least 4 alphanumeric characters)
@@ -93,6 +96,15 @@ Parameters:
       - r5.4xlarge
       - r5.8xlarge
       - r5.16xlarge
+  LatestAmiIdForIRISParameter:
+    #Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    # Changed to String type to allow multiple values
+    Description: Public Systems Manager Parameter
+    Type: String
+    Default: /aws/service/ami-windows-latest/Windows_Server-2019-Japanese-Full-Base
+    AllowedValues: 
+      - /aws/service/ami-windows-latest/Windows_Server-2019-Japanese-Full-Base
+      - /aws/service/ami-windows-latest/Windows_Server-2019-English-Full-Base
 Resources:
   InstanceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -107,6 +119,14 @@ Resources:
       IpProtocol: TCP
       FromPort: 22
       ToPort: 22
+      CidrIp: '0.0.0.0/0'
+  SecurityGroupIngressRDP:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref InstanceSecurityGroup
+      IpProtocol: TCP
+      FromPort: 3389
+      ToPort: 3389
       CidrIp: '0.0.0.0/0'
   SecurityGroupIngressIRISSuperServer:
     Type: AWS::EC2::SecurityGroupIngress
@@ -144,9 +164,10 @@ Resources:
         IRISPasswordParameter: !Ref IRISPasswordParameter
         S3BucketNameParameter: !Ref S3BucketNameParameter
         InstanceTypeParameter: !Ref InstanceTypeParameter
+        LatestAmiIdParameter: !Ref LatestAmiIdForIRISParameter
         MirrorInstanceRole: PRIMARY
         MirrorArbiterIP: !GetAtt 'Arbiter.Outputs.NodePrivateIP'
-      TemplateURL: https://my-cf-templates.s3-ap-northeast-1.amazonaws.com/MirrorNode.yaml
+      TemplateURL: https://my-cf-templates.s3-ap-northeast-1.amazonaws.com/MirrorNode_Windows.yaml
       #TimeoutInMinutes: '5'
   Node02:
     Type: AWS::CloudFormation::Stack
@@ -160,17 +181,18 @@ Resources:
         IRISPasswordParameter: !Ref IRISPasswordParameter
         S3BucketNameParameter: !Ref S3BucketNameParameter
         InstanceTypeParameter: !Ref InstanceTypeParameter
+        LatestAmiIdParameter: !Ref LatestAmiIdForIRISParameter
         MirrorInstanceRole: FAILOVER
         MirrorPrimaryIP: !GetAtt 'Node01.Outputs.NodePrivateIP'
-      TemplateURL: https://my-cf-templates.s3-ap-northeast-1.amazonaws.com/MirrorNode.yaml
+      TemplateURL: https://my-cf-templates.s3-ap-northeast-1.amazonaws.com/MirrorNode_Windows.yaml
       #TimeoutInMinutes: '5'
   Arbiter:
     Type: AWS::CloudFormation::Stack
     Properties:
       Parameters:
-        #VpcIdParameter: !Ref VpcIdParameter
+        VpcIdParameter: !Ref VpcIdParameter
         InstanceSubnetIdParameter: !Select [2,!Ref InstanceSubnetIdParameter]
-        InstanceSecurityGroupParameter: !Ref InstanceSecurityGroup
+        #InstanceSecurityGroupParameter: !Ref InstanceSecurityGroup
         SshKeyParameter: !Ref SshKeyParameter
         IamInstanceProfileParameter: !Ref IamInstanceProfileParameter
         S3BucketNameParameter: !Ref S3BucketNameParameter
@@ -207,6 +229,15 @@ Resources:
       LoadBalancerArn: !Ref LoadBalancer
       Port: 51773
       Protocol: TCP
+  LBListener52773:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties: 
+      DefaultActions: 
+        - Type: forward
+          TargetGroupArn: !Ref LBTargetGroup52773
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 52773
+      Protocol: TCP
   LBTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
@@ -219,6 +250,23 @@ Resources:
       VpcId: !Ref VpcIdParameter
       Name: !Sub "${AWS::StackName}-TargetGroup"
       Port: 51773
+      Protocol: TCP
+      TargetType: ip
+      Targets:
+        - Id: !GetAtt 'Node01.Outputs.NodePrivateIP'
+        - Id: !GetAtt 'Node02.Outputs.NodePrivateIP'
+  LBTargetGroup52773:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckPath: /csp/mirror_status.cxw
+      HealthCheckPort: '52773'
+      HealthCheckProtocol: HTTP
+      #HealthCheckTimeoutSeconds: 10
+      #HealthCheckIntervalSeconds: 10
+      #UnhealthyThresholdCount: 3
+      VpcId: !Ref VpcIdParameter
+      Name: !Sub "${AWS::StackName}-TargetGroup52773"
+      Port: 52773
       Protocol: TCP
       TargetType: ip
       Targets:
@@ -266,12 +314,21 @@ Outputs:
     Value: !Join
       - ''
       - ['jdbc:IRIS://', !GetAtt 'LoadBalancer.DNSName', ':51773/DATA']
+  HTTPEndpoint:
+    Description: SMP Endpoint as an example for HTTP access
+    Value: !Join
+      - ''
+      - ['http://', !GetAtt 'LoadBalancer.DNSName', ':52773/csp/sys/%25CSP.Portal.Home.zen']
+  IntHTTPEndpoint:
+    Description: Endpoint for internal HTTP access
+    Value: !Join
+      - ''
+      - ['http://', !GetAtt 'InternalLoadBalancer.DNSName', ':52773/csp/sys/%25CSP.Portal.Home.zen']
   Node01PrivateIP:
     Description: Node 01 Private IP
     Value: !Join
       - ''
       - ['', !GetAtt Node01.Outputs.NodePrivateIP, '']
-      #- ['http://', !GetAtt 'Node01.Outputs.NodePrivateIP', ':52773/csp/sys/%25CSP.Portal.Home.zen']
 
   Node02PrivateIP:
     Description: Node 02 Private IP
@@ -290,6 +347,18 @@ Outputs:
     Value: !Join
       - ''
       - ['ssh -J ec2-user@', !GetAtt Bastion.Outputs.NodePublicIP, ' ec2-user@', !GetAtt Node02.Outputs.NodePrivateIP,' -L 52773:', !GetAtt Node02.Outputs.NodePrivateIP,':52773']
+
+  Node01ViaBastionAlt:
+    Description: Node 01 Connection via Bastion, Alternative way. 
+    Value: !Join
+      - ''
+      - ['ssh -i .ssh\',!Ref SshKeyParameter, '.pem -L 52773:', !GetAtt Node01.Outputs.NodePrivateIP,':52773', ' ec2-user@', !GetAtt Bastion.Outputs.NodePublicIP]
+
+  Node02ViaBastionAlt:
+    Description: Node 02 Connection via Bastion, Alternative way. 
+    Value: !Join
+      - ''
+      - ['ssh -i .ssh\',!Ref SshKeyParameter, '.pem -L 52773:', !GetAtt Node02.Outputs.NodePrivateIP,':52773', ' ec2-user@', !GetAtt Bastion.Outputs.NodePublicIP]
 
   BastionPublicIP:
     Description: Basion Host public IP
